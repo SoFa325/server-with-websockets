@@ -10,10 +10,38 @@ import (
 	"flag"
 	"html/template"
 	"log"
+    "fmt"
 	"net/http"
-
+    "github.com/sparrc/go-ping"
 	"github.com/gorilla/websocket"
 )
+
+func Pinger(c *websocket.Conn, h string) {
+    pinger, err := ping.NewPinger(h)
+	pinger.Count = 7
+	if err != nil {
+		c.WriteMessage(websocket.TextMessage, []byte("Error: "+err.Error()))
+		return
+	}
+	pinger.OnRecv = func(pkt *ping.Packet) {
+		out := fmt.Sprintf("%d bytes from %s: icmp_seq=%d time=%v\n",
+			pkt.Nbytes, pkt.IPAddr, pkt.Seq, pkt.Rtt)
+            c.WriteMessage(websocket.TextMessage, []byte(out))
+	}
+	pinger.OnFinish = func(stats *ping.Statistics) {
+		out := fmt.Sprintf("\n--- %s ping statistics ---\n", stats.Addr)
+        c.WriteMessage(websocket.TextMessage, []byte(out))
+		out = fmt.Sprintf("%d packets transmitted, %d packets received, %v%% packet loss\n",
+			stats.PacketsSent, stats.PacketsRecv, stats.PacketLoss)
+            c.WriteMessage(websocket.TextMessage, []byte(out))
+		out = fmt.Sprintf("round-trip min/avg/max/stddev = %v/%v/%v/%v\n",
+			stats.MinRtt, stats.AvgRtt, stats.MaxRtt, stats.StdDevRtt)
+            c.WriteMessage(websocket.TextMessage, []byte(out))
+	}
+	out := fmt.Sprintf("PING %s (%s):\n", pinger.Addr(), pinger.IPAddr())
+	c.WriteMessage(websocket.TextMessage, []byte(out))
+	pinger.Run()
+}
 
 var addr = flag.String("addr", "localhost:8080", "http service address")
 
@@ -32,6 +60,8 @@ func echo(w http.ResponseWriter, r *http.Request) {
 			log.Println("read:", err)
 			break
 		}
+        host := string(message)
+		go Pinger(c, host)
 		log.Printf("recv: %s", message)
 		err = c.WriteMessage(mt, message)
 		if err != nil {
@@ -89,12 +119,13 @@ window.addEventListener("load", function(evt) {
         }
         return false;
     };
-    document.getElementById("send").onclick = function(evt) {
+    document.getElementById("ping").onclick = function(evt) {
         if (!ws) {
             return false;
         }
-        print("SEND: " + input.value);
+        print("ping "+input.value);
         ws.send(input.value);
+        return false;
         return false;
     };
     document.getElementById("close").onclick = function(evt) {
@@ -118,7 +149,7 @@ You can change the message and send multiple times.
 <button id="open">Open</button>
 <button id="close">Close</button>
 <p><input id="input" type="text" value="Hello world!">
-<button id="send">Send</button>
+<button id="ping">Ping</button>
 </form>
 </td><td valign="top" width="50%">
 <div id="output" style="max-height: 70vh;overflow-y: scroll;"></div>
