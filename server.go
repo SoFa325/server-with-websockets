@@ -1,159 +1,97 @@
-// Copyright 2015 The Gorilla WebSocket Authors. All rights reserved.
-// Use of this source code is governed by a BSD-style
-// license that can be found in the LICENSE file.
-
-// +build ignore
-
 package main
 
 import (
 	"flag"
-	"html/template"
-	"log"
-    "fmt"
-	"net/http"
-    "github.com/sparrc/go-ping"
-	"github.com/gorilla/websocket"
+	"fmt"
+	"strings"
+	"os/exec"
+	"bufio"
+	"net"
+	"github.com/tatsushid/go-fastping"
+    "time"
 )
 
-func Pinger(c *websocket.Conn, h string) {
-    pinger, err := ping.NewPinger(h)
-	pinger.Count = 7
-	if err != nil {
-		c.WriteMessage(websocket.TextMessage, []byte("Error: "+err.Error()))
-		return
-	}
-	pinger.OnRecv = func(pkt *ping.Packet) {
-		out := fmt.Sprintf("%d bytes from %s: icmp_seq=%d time=%v\n",
-			pkt.Nbytes, pkt.IPAddr, pkt.Seq, pkt.Rtt)
-            c.WriteMessage(websocket.TextMessage, []byte(out))
-	}
-	pinger.OnFinish = func(stats *ping.Statistics) {
-		out := fmt.Sprintf("\n--- %s ping statistics ---\n", stats.Addr)
-        c.WriteMessage(websocket.TextMessage, []byte(out))
-		out = fmt.Sprintf("%d packets transmitted, %d packets received, %v%% packet loss\n",
-			stats.PacketsSent, stats.PacketsRecv, stats.PacketLoss)
-            c.WriteMessage(websocket.TextMessage, []byte(out))
-		out = fmt.Sprintf("round-trip min/avg/max/stddev = %v/%v/%v/%v\n",
-			stats.MinRtt, stats.AvgRtt, stats.MaxRtt, stats.StdDevRtt)
-            c.WriteMessage(websocket.TextMessage, []byte(out))
-	}
-	out := fmt.Sprintf("PING %s (%s):\n", pinger.Addr(), pinger.IPAddr())
-	c.WriteMessage(websocket.TextMessage, []byte(out))
-	pinger.Run()
+func trace (conn *net.TCPConn, h string) {
+    cmd := exec.Command("tracert", h)
+    fmt.Println(h)
+    dateOut, _ := cmd.Output()
+    fmt.Println(dateOut)
+    
+    start := 0
+    for i := 0; i < len(dateOut); i++ {
+        if dateOut[i] == byte(10) {
+            //fmt.Println(string(dateOut[start:i]))
+            conn.Write([]byte(string(dateOut[start:i])+"\n"))
+            start = i + 1
+            time.Sleep(100 * time.Millisecond)
+        }
+    }
 }
 
-var addr = flag.String("addr", "localhost:8080", "http service address")
+func Pinger(conn *net.TCPConn, h string) {
+    p := fastping.NewPinger()
+    ra, _ := net.ResolveIPAddr("ip4:icmp", h)
+    p.AddIPAddr(ra)
+    p.OnRecv = func(addr *net.IPAddr, rtt time.Duration) {
+        out := fmt.Sprintf("IP Addr: %s receive, RTT: %v\n", addr.String(), rtt)
+        conn.Write([]byte(out+"\n"))
+    }
+    p.OnIdle = func() {
+        out := fmt.Sprintf("finish")
+        conn.Write([]byte(out+"\n"))
+    }
+    p.RunLoop()
+    time.Sleep(time.Millisecond*3000)
+    p.Stop()
+}
 
-var upgrader = websocket.Upgrader{} // use default options
-
-func echo(w http.ResponseWriter, r *http.Request) {
-	c, err := upgrader.Upgrade(w, r, nil)
-	if err != nil {
-		log.Print("upgrade:", err)
-		return
-	}
-	defer c.Close()
+// serve - метод, в котором реализован цикл взаимодействия с клиентом.
+// Подразумевается, что метод serve будет вызаваться в отдельной go-программе.
+func serve(conn *net.TCPConn) {
+	defer conn.Close()
+    z:= bufio.NewReader(conn)
 	for {
-		mt, message, err := c.ReadMessage()
-		if err != nil {
-			log.Println("read:", err)
-			break
+		message, _ := z.ReadString('\n')
+    	// Распечатываем полученое сообщение
+    	fmt.Print("Message Received:", string(message))
+    	// Процесс выборки для полученной строки
+		if (strings.HasPrefix(message, "ping")) {
+			go Pinger(conn, message[4:len(message)-1])
 		}
-        host := string(message)
-		go Pinger(c, host)
-		log.Printf("recv: %s", message)
-		err = c.WriteMessage(mt, message)
-		if err != nil {
-			log.Println("write:", err)
-			break
+		if (strings.HasPrefix(message, "trace")) {
+			go trace(conn, message[5:len(message)-1])
 		}
 	}
 }
 
-func home(w http.ResponseWriter, r *http.Request) {
-	homeTemplate.Execute(w, "ws://"+r.Host+"/echo")
-}
 
 func main() {
+    // Работа с командной строкой, в которой может указываться необязательный ключ -addr.
+	var addrStr string
+	flag.StringVar(&addrStr, "addr", "127.0.0.1:9000", "specify ip address and port")
 	flag.Parse()
-	log.SetFlags(0)
-	http.HandleFunc("/echo", echo)
-	http.HandleFunc("/", home)
-	log.Fatal(http.ListenAndServe(*addr, nil))
-}
 
-var homeTemplate = template.Must(template.New("").Parse(`
-<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-<script>
-window.addEventListener("load", function(evt) {
-    var output = document.getElementById("output");
-    var input = document.getElementById("input");
-    var ws;
-    var print = function(message) {
-        var d = document.createElement("div");
-        d.textContent = message;
-        output.appendChild(d);
-        output.scroll(0, output.scrollHeight);
-    };
-    document.getElementById("open").onclick = function(evt) {
-        if (ws) {
-            return false;
-        }
-        ws = new WebSocket("{{.}}");
-        ws.onopen = function(evt) {
-            print("OPEN");
-        }
-        ws.onclose = function(evt) {
-            print("CLOSE");
-            ws = null;
-        }
-        ws.onmessage = function(evt) {
-            print("RESPONSE: " + evt.data);
-        }
-        ws.onerror = function(evt) {
-            print("ERROR: " + evt.data);
-        }
-        return false;
-    };
-    document.getElementById("ping").onclick = function(evt) {
-        if (!ws) {
-            return false;
-        }
-        print("ping "+input.value);
-        ws.send(input.value);
-        return false;
-        return false;
-    };
-    document.getElementById("close").onclick = function(evt) {
-        if (!ws) {
-            return false;
-        }
-        ws.close();
-        return false;
-    };
-});
-</script>
-</head>
-<body>
-<table>
-<tr><td valign="top" width="50%">
-<p>Click "Open" to create a connection to the server,
-"Send" to send a message to the server and "Close" to close the connection.
-You can change the message and send multiple times.
-<p>
-<form>
-<button id="open">Open</button>
-<button id="close">Close</button>
-<p><input id="input" type="text" value="Hello world!">
-<button id="ping">Ping</button>
-</form>
-</td><td valign="top" width="50%">
-<div id="output" style="max-height: 70vh;overflow-y: scroll;"></div>
-</td></tr></table>
-</body>
-</html>
-`))
+    // Разбор адреса, строковое представление которого находится в переменной addrStr.
+	if addr, err := net.ResolveTCPAddr("tcp", addrStr); err != nil {
+		fmt.Println("address resolution failed", "address", addrStr)
+	} else {
+		fmt.Println("resolved TCP address", "address", addr.String())
+
+        // Инициация слушания сети на заданном адресе.
+		if listener, err := net.ListenTCP("tcp", addr); err != nil {
+			fmt.Println("listening failed", "reason", err)
+		} else {
+            // Цикл приёма входящих соединений.
+			for {
+				if conn, err := listener.AcceptTCP(); err != nil {
+					fmt.Println("cannot accept connection", "reason", err)
+				} else {
+					fmt.Println("accepted connection", "address", conn.RemoteAddr().String())
+
+                    // Запуск go-программы для обслуживания клиентов.
+					go serve(conn)
+				}
+			}
+		}
+	}
+}
